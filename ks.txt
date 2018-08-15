@@ -1,0 +1,98 @@
+kubernetes  集群的安全设置
+	基于CA签名的双向数字证书认证方式：
+	内部组件间的通信 apiserver,http://apiserver:8080      应该使用更安全的https
+	kubernetes 提供了基于CA签名的双向数字证书认证方式和简单的基于HTTPS BASE或TOKEN的认证方式，其中CA认证方式最安全
+	基于CA签名的双向数字证书认证的生成过程如下：
+	1）为kube-apiserver生成数字证书，并用CA证书进行签名
+	2）为kube-apiserver进程配置证书相关的启动参数，包括CA证书（用于验证客户端签名的真伪）、自己的经过CA签名后的证书及私钥
+	3）为每个客户端生成数字证书
+（1）设置kube-apiserver的CA证书文件和启动参数
+	使用openSSL工具在master服务器上创建CA证书和私钥相关的文件
+	#openssl  genrsa  -out  ca.key   2048
+	#openssl  req -x509  -new -nodes  -key ca.key  -subj  "/CN=yourcompany.com -days 5000  -out ca.crt
+	#openssl  genrsa  -out server.key   2048
+	注意：生成ca.crt时，-subi  参数中“/CN”的值通常是域名。
+	准备master_ssl.cnf文件，该文件用于x509v3版本的。在该文件中主要需要设置master节点的hostname,IP地址，以及Kubernetes Master Service 的虚拟服务名称（kubernetes.default等）和该虚拟服务的ClusterIP地址
+	[req]
+	req_extensions = v3_req
+	distinguished_name = req_distinguished_name
+	[req_distinguished_name]
+	[v3_req]
+	basicConstraints = CA:FALSE
+	keyUsage = nonRepudiation,digitalSignature,keyEncipherment
+	subjectAltName=@alt_names
+	[alt_name]
+	DNS.1=kubernetes
+	DNS.2=kubernetes.default
+	DNS.3=kubernetes.default.svc
+	DNS.4=kubernetes.default.svc.cluster.local
+	DNS.5=k8s-master
+	IP.1=169.169.0.1   #cluster ip
+	IP.2=192.168.18.3  #master
+	
+	基于master_ssl.cnf创建server.csr和server.crt文件
+	生成serever.csr时，-subj参数中“/CN”指定的名字需为master所在的主机名
+	#openssl  req -new  -key server.key  -subj "/CN=k8s-master"  --config master_ssl.cnf   -out  server.csr 
+	#openssl    x509  -req -in   server.csr -CA ca.crt -CAkey ca.key   -CAcreateserial -days   5000  -extensions v3_req -extfile master_ssl.cnf  -out  server.crt
+	全部执行完后会生成6个文件：
+	ca.crt  ca.key  ca.srl  server.csr server.key 
+	将这些文件复制到一个目录中 /var/run/kubernetes  
+	然后设置kube-apiserver的三个	启动参数
+	--client-ca-file  --tls-cert-file  --tls-private-key-file 分别代表CA根证书文件、服务端证书文件和服务端私钥文件
+	--client-ca-file： /var/run/kubernetes /ca.crt 
+	--tls-cert-file ：/var/run/kubernetes  /server.key
+	--tls-private-key-file： /var/run/kubernetes /server.crt
+	同时，可以关掉非安全端口8080，设置安全端口为443（默认为6443）
+	--insecure-port= 0
+	--secure-port=443
+	最后重启kube-apiserver服务
+	（2）设置kube-controller-manager 的客户端证书
+	#openssl  genrsa    -out  cs_client.key  2048
+	#openssl req  -new -key  cs_client.key  -subj  "/CN=k8s-node-1"   -out  cs_client.csr
+	#openssl  x509  -req  -in cs_client.csr  -CA ca.crt  -CAkey ca.key -CAcreateserial     -out  cs_client .crt   -days   5000  
+	生成 cs_client.crt 时 -CA  和-CAkey  使用的是apiserver 的 ca.crt  ca.key 然后将这些文件复制到一个目录中，（例如：/var/run/kubernetes）	创建/etc/kubernetes/kubeconfig文件（kube-controller-manager与kube-scheduler共用）content:
+	apiVersion:v1
+	kind:Config
+	users:
+	- name: controllermanager
+	   user:
+			client-certificate: /var/run/kubernetes/cs_client.crt
+			client-key: /var/run/kubernetes/cs.client.key
+	clusters:
+	- name: local
+		cluster:
+		 certificate-authority:  /var/run/kubernetes/ca.crt
+	contexts:
+	- context:
+		 cluster:local
+		 user:controllermanager
+		name: my-context
+	current-ccontext: my-context
+然后设置kube-controller-manager服务的启动参数，注意，--master的地址为https安全服务地址
+--master=https://192.168.18.3:443
+--service_accoun_private_key_file=/var/run/kubernetes/server.key
+--root-ca-file=/var/run/kubernetes/ca.crt
+--kubeconfig=/etc/kubernetes/kubeconfig
+重启kube-controller-manager服务
+（3）设置kube-scheduler启动参数
+--master=https://192.168.18.3:443
+--kubeconfig=/etc/kubernetes/kubeconfig
+重启服务
+（4）设置每台Node上kubelet的客户端证书，私钥，和启动参数
+@apiserver#:cp   ca.crt     ca.key     >>>node   
+  生成 cs_client.crt 时 -CA  和-CAkey  使用的是apiserver 的 ca.crt  ca.key ，	生成serever.csr时，-subj参数中“/CN”指定的名字需为Node所在的ip
+  #openssl genrsa   -out  kubelet_client.key   2048
+  #openssl   req -new  -key kubelet_client.key  -subj "/CN=192.168.18.4"  kubelet_client.csr 
+	#openssl    x509  -req -in  kubelet_client.csr -CA ca.crt -CAkey ca.key   -CAcreateserial  kubelet_client.crt   -days   5000 
+	将这些文件复制到一个目录中（/var/run/kerbernetes/）
+创建/etc/kubernetes/kubeconfig  文件（kubelet与kube-proxy共用）
+
+		 
+	
+	
+	
+	
+	
+	
+	
+	
